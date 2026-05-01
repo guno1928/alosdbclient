@@ -22,6 +22,8 @@ const (
 	opFlush      opCode = 14
 	opBatch      opCode = 15
 	opTxBatch    opCode = 16
+	opUpsertOne  opCode = 17
+	opUpsertMany opCode = 18
 )
 
 type batchRequest struct {

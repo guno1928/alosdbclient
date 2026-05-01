@@ -621,6 +621,10 @@ func (c *Client) callDirect(op opCode, collName string, args interface{}) (*resp
 	return &resp, nil
 }
 
+// ============================================================================
+// Collection Methods - FIXED
+// ============================================================================
+
 type remoteCollection struct {
 	client *Client
 	name   string
@@ -639,21 +643,34 @@ func (rc *remoteCollection) invalidateCache() {
 	}
 }
 
+// InsertOne inserts a single document. In async mode the ID is pre-generated
+// client-side before sending, so the returned ID is always valid even when
+// the server processes the insert in the background.
 func (rc *remoteCollection) InsertOne(doc Document) (string, error) {
-	resp, err := rc.client.call(opInsertOne, rc.name, insertOneArgs{Doc: doc})
+	if doc.GetID() == "" {
+		doc["_id"] = generateDocID()
+	}
+	id := doc.GetID()
+
+	// Use callDirect with raw doc. The server expects types.Document
+	// (map[string]interface{}) not a wrapper struct like insertOneArgs.
+	resp, err := rc.client.callDirect(opInsertOne, rc.name, doc)
 	if err != nil {
 		return "", err
 	}
-
 	rc.invalidateCache()
 
-	var result struct {
-		ID string `msgpack:"id"`
+	// In async mode the server sends an empty ack; the actual result is
+	// processed in the background and not returned. Return the pre-gen ID.
+	if resp != nil && len(resp.Result) > 0 {
+		var result struct {
+			ID string `msgpack:"id"`
+		}
+		if err := msgpack.Unmarshal(resp.Result, &result); err == nil && result.ID != "" {
+			return result.ID, nil
+		}
 	}
-	if err := msgpack.Unmarshal(resp.Result, &result); err != nil {
-		return "", err
-	}
-	return result.ID, nil
+	return id, nil
 }
 
 func (rc *remoteCollection) InsertMany(docs []Document) ([]string, error) {
@@ -792,32 +809,46 @@ func (rc *remoteCollection) DeleteOne(filter Document) error {
 	return err
 }
 
+// DeleteMany deletes all documents matching filter. Uses callDirect to bypass
+// the async batching path so the count is accurate in sync mode. In async mode
+// returns 0 since the count is not available from the empty ack.
 func (rc *remoteCollection) DeleteMany(filter Document) (int, error) {
-	resp, err := rc.client.call(opDeleteMany, rc.name, deleteArgs{Filter: filter})
+	resp, err := rc.client.callDirect(opDeleteMany, rc.name, deleteArgs{Filter: filter})
 	if err != nil {
 		return 0, err
 	}
 	rc.invalidateCache()
 
-	var result struct {
-		Deleted int `msgpack:"deleted"`
+	if resp != nil && len(resp.Result) > 0 {
+		var result struct {
+			Deleted int `msgpack:"deleted"`
+		}
+		if err := msgpack.Unmarshal(resp.Result, &result); err == nil {
+			return result.Deleted, nil
+		}
 	}
-	msgpack.Unmarshal(resp.Result, &result)
-	return result.Deleted, nil
+	return 0, nil
 }
 
+// UpdateMany updates all documents matching filter. Uses callDirect to bypass
+// the async batching path so the count is accurate in sync mode. In async mode
+// returns 0 since the count is not available from the empty ack.
 func (rc *remoteCollection) UpdateMany(filter Document, update Document) (int, error) {
-	resp, err := rc.client.call(opUpdateMany, rc.name, updateArgs{Filter: filter, Update: update})
+	resp, err := rc.client.callDirect(opUpdateMany, rc.name, updateArgs{Filter: filter, Update: update})
 	if err != nil {
 		return 0, err
 	}
 	rc.invalidateCache()
 
-	var result struct {
-		Updated int `msgpack:"updated"`
+	if resp != nil && len(resp.Result) > 0 {
+		var result struct {
+			Updated int `msgpack:"updated"`
+		}
+		if err := msgpack.Unmarshal(resp.Result, &result); err == nil {
+			return result.Updated, nil
+		}
 	}
-	msgpack.Unmarshal(resp.Result, &result)
-	return result.Updated, nil
+	return 0, nil
 }
 
 func (rc *remoteCollection) Count() int64 {
@@ -842,61 +873,56 @@ func (rc *remoteCollection) GetName() string {
 	return rc.name
 }
 
+// UpsertOne updates one document if found, otherwise inserts a new document.
+// Wires directly to the server's handleUpsertOne instead of emulating with
+// FindOne + InsertOne/UpdateOne (which was broken by the InsertOne async
+// batching path and required extra round-trips).
 func (rc *remoteCollection) UpsertOne(filter Document, update Document) (bool, error) {
-	_, err := rc.FindOne(filter)
+	resp, err := rc.client.callDirect(opUpsertOne, rc.name, updateArgs{Filter: filter, Update: update})
 	if err != nil {
-		merged := make(Document)
-		for k, v := range filter {
-			if !strings.HasPrefix(k, "$") {
-				merged[k] = v
-			}
-		}
-		if setDoc, ok := update["$set"].(map[string]interface{}); ok {
-			for k, v := range setDoc {
-				merged[k] = v
-			}
-		}
-		_, insertErr := rc.InsertOne(merged)
-		if insertErr != nil {
-			return false, insertErr
-		}
-		return true, nil
+		return false, err
 	}
-	updateErr := rc.UpdateOne(filter, update)
 	rc.invalidateCache()
-	return false, updateErr
+
+	if resp != nil && len(resp.Result) > 0 {
+		var result struct {
+			Inserted bool `msgpack:"inserted"`
+		}
+		if err := msgpack.Unmarshal(resp.Result, &result); err == nil {
+			return result.Inserted, nil
+		}
+	}
+	return false, nil
 }
 
+// UpsertMany updates or inserts documents matching filter. Wires directly to
+// the server's handleUpsertMany instead of emulating with UpdateMany + InsertOne.
 func (rc *remoteCollection) UpsertMany(filter Document, update Document) (int, int, error) {
-	updated, err := rc.UpdateMany(filter, update)
+	resp, err := rc.client.callDirect(opUpsertMany, rc.name, updateArgs{Filter: filter, Update: update})
 	if err != nil {
 		return 0, 0, err
 	}
-	if updated > 0 {
-		return updated, 0, nil
-	}
-	merged := make(Document)
-	for k, v := range filter {
-		if !strings.HasPrefix(k, "$") {
-			merged[k] = v
-		}
-	}
-	if setDoc, ok := update["$set"].(map[string]interface{}); ok {
-		for k, v := range setDoc {
-			merged[k] = v
-		}
-	}
-	_, insertErr := rc.InsertOne(merged)
-	if insertErr != nil {
-		return 0, 0, insertErr
-	}
 	rc.invalidateCache()
-	return 0, 1, nil
+
+	if resp != nil && len(resp.Result) > 0 {
+		var result struct {
+			Matched  int `msgpack:"matched"`
+			Inserted int `msgpack:"inserted"`
+		}
+		if err := msgpack.Unmarshal(resp.Result, &result); err == nil {
+			return result.Matched, result.Inserted, nil
+		}
+	}
+	return 0, 0, nil
 }
 
 func (rc *remoteCollection) Aggregate(pipeline []Document) ([]Document, error) {
 	return nil, fmt.Errorf("aggregate not supported over network")
 }
+
+// ============================================================================
+// Database Methods
+// ============================================================================
 
 type remoteDatabase struct {
 	client *Client
@@ -1005,6 +1031,10 @@ func ConnectWithConfig(config *ClientConfig, opts ...ClientOption) (DatabaseInte
 		name:   "default",
 	}, nil
 }
+
+// ============================================================================
+// Transaction Methods
+// ============================================================================
 
 type remoteTransaction struct {
 	db         *remoteDatabase
