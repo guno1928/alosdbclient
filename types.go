@@ -32,6 +32,7 @@ type CollectionInterface interface {
 	Count() int64
 	Drop()
 	GetName() string
+	HasCollection() (bool, error)
 }
 
 // DatabaseInterface defines the operations available on a database instance.
@@ -44,6 +45,7 @@ type DatabaseInterface interface {
 	Transaction(fn func(tx TransactionInterface) error) error
 	Export(w io.Writer, collections []string) error
 	Import(r io.Reader) (*ImportResult, error)
+	DBExists(name string) (bool, error)
 }
 
 // TransactionInterface defines operations within an ACID transaction.

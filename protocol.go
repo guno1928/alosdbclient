@@ -22,8 +22,10 @@ const (
 	opFlush      opCode = 14
 	opBatch      opCode = 15
 	opTxBatch    opCode = 16
-	opUpsertOne  opCode = 17
-	opUpsertMany opCode = 18
+	opUpsertOne         opCode = 17
+	opUpsertMany        opCode = 18
+	opDBExists          opCode = 19
+	opCollectionExists  opCode = 20
 )
 
 type batchRequest struct {
@@ -78,6 +80,14 @@ type findByIDArgs struct {
 type updateArgs struct {
 	Filter map[string]interface{} `msgpack:"filter"`
 	Update map[string]interface{} `msgpack:"update"`
+}
+
+type existsArgs struct {
+	Name string `msgpack:"name"`
+}
+
+type existsResult struct {
+	Exists bool `msgpack:"exists"`
 }
 
 type deleteArgs struct {

@@ -621,10 +621,6 @@ func (c *Client) callDirect(op opCode, collName string, args interface{}) (*resp
 	return &resp, nil
 }
 
-// ============================================================================
-// Collection Methods - FIXED
-// ============================================================================
-
 type remoteCollection struct {
 	client *Client
 	name   string
@@ -873,6 +869,18 @@ func (rc *remoteCollection) GetName() string {
 	return rc.name
 }
 
+func (rc *remoteCollection) HasCollection() (bool, error) {
+	resp, err := rc.client.callDirect(opCollectionExists, rc.name, existsArgs{Name: rc.name})
+	if err != nil {
+		return false, err
+	}
+	var result existsResult
+	if err := msgpack.Unmarshal(resp.Result, &result); err != nil {
+		return false, err
+	}
+	return result.Exists, nil
+}
+
 // UpsertOne updates one document if found, otherwise inserts a new document.
 // Wires directly to the server's handleUpsertOne instead of emulating with
 // FindOne + InsertOne/UpdateOne (which was broken by the InsertOne async
@@ -920,10 +928,6 @@ func (rc *remoteCollection) Aggregate(pipeline []Document) ([]Document, error) {
 	return nil, fmt.Errorf("aggregate not supported over network")
 }
 
-// ============================================================================
-// Database Methods
-// ============================================================================
-
 type remoteDatabase struct {
 	client *Client
 	name   string
@@ -938,6 +942,18 @@ func (db *remoteDatabase) Collection(name string) CollectionInterface {
 
 func (db *remoteDatabase) ListCollections() []string {
 	return nil
+}
+
+func (db *remoteDatabase) DBExists(name string) (bool, error) {
+	resp, err := db.client.callDirect(opDBExists, "", existsArgs{Name: name})
+	if err != nil {
+		return false, err
+	}
+	var result existsResult
+	if err := msgpack.Unmarshal(resp.Result, &result); err != nil {
+		return false, err
+	}
+	return result.Exists, nil
 }
 
 func (db *remoteDatabase) GetStats() map[string]interface{} {
@@ -1031,10 +1047,6 @@ func ConnectWithConfig(config *ClientConfig, opts ...ClientOption) (DatabaseInte
 		name:   "default",
 	}, nil
 }
-
-// ============================================================================
-// Transaction Methods
-// ============================================================================
 
 type remoteTransaction struct {
 	db         *remoteDatabase
