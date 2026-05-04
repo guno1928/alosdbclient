@@ -1,10 +1,12 @@
 package alosdbclient
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -62,9 +64,7 @@ func newPooledTransport(serverAddr string, poolSize int, psk []byte) (clientTran
 		if tcp, ok := transport.(*tcpClientTransport); ok && psk != nil {
 			tcp.psk = psk
 		}
-		if err := transport.connect(serverAddr); err != nil {
-			return nil, err
-		}
+		_ = transport.connect(serverAddr)
 		return transport, nil
 	}
 
@@ -74,12 +74,7 @@ func newPooledTransport(serverAddr string, poolSize int, psk []byte) (clientTran
 		if tcp, ok := transport.(*tcpClientTransport); ok && psk != nil {
 			tcp.psk = psk
 		}
-		if err := transport.connect(serverAddr); err != nil {
-			for j := 0; j < i; j++ {
-				transports[j].close()
-			}
-			return nil, err
-		}
+		_ = transport.connect(serverAddr)
 		transports[i] = transport
 	}
 
@@ -137,6 +132,8 @@ type tcpClientTransport struct {
 	psk       []byte
 	encCipher *connCipher
 	decCipher *connCipher
+	addr      string
+	connected int32
 }
 
 func newTCPClientTransport() clientTransport {
@@ -146,8 +143,20 @@ func newTCPClientTransport() clientTransport {
 }
 
 func (t *tcpClientTransport) connect(addr string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.connected == 1 && t.conn != nil {
+		return nil
+	}
+
+	if t.conn != nil {
+		t.conn.Close()
+	}
+
 	conn, err := net.DialTimeout("tcp4", addr, 10*time.Second)
 	if err != nil {
+		atomic.StoreInt32(&t.connected, 0)
 		return err
 	}
 
@@ -160,68 +169,169 @@ func (t *tcpClientTransport) connect(addr string) error {
 	}
 
 	t.conn = conn
+	t.addr = addr
 
 	if t.psk != nil {
 		enc, dec, err := performClientHandshake(conn, t.psk, 10*time.Second)
 		if err != nil {
 			conn.Close()
+			t.conn = nil
+			atomic.StoreInt32(&t.connected, 0)
 			return fmt.Errorf("encryption handshake failed: %w", err)
 		}
 		t.encCipher = enc
 		t.decCipher = dec
 	}
 
+	atomic.StoreInt32(&t.connected, 1)
 	return nil
 }
 
-func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
+}
+
+func (t *tcpClientTransport) resetConnection() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if t.conn != nil {
+		t.conn.Close()
+	}
+	t.conn = nil
+	t.encCipher = nil
+	t.decCipher = nil
+	atomic.StoreInt32(&t.connected, 0)
+	t.mu.Unlock()
+}
 
-	if t.encCipher != nil {
-		if err := t.encCipher.encryptAndWrite(t.conn, &t.writeBuf, data); err != nil {
+func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		t.mu.Lock()
+
+		if atomic.LoadInt32(&t.connected) == 0 || t.conn == nil {
+			t.mu.Unlock()
+			if err := t.connect(t.addr); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		if t.encCipher != nil {
+			if err := t.encCipher.encryptAndWrite(t.conn, &t.writeBuf, data); err != nil {
+				t.mu.Unlock()
+				if isNetworkError(err) && attempt == 0 {
+					t.resetConnection()
+					continue
+				}
+				return nil, err
+			}
+		} else {
+			if err := writePrefixed(t.conn, &t.writeBuf, data); err != nil {
+				t.mu.Unlock()
+				if isNetworkError(err) && attempt == 0 {
+					t.resetConnection()
+					continue
+				}
+				return nil, err
+			}
+		}
+
+		var respLenBuf [4]byte
+		t.conn.SetReadDeadline(time.Now().Add(t.timeout))
+		if _, err := io.ReadFull(t.conn, respLenBuf[:]); err != nil {
+			t.mu.Unlock()
+			if isNetworkError(err) && attempt == 0 {
+				t.resetConnection()
+				continue
+			}
 			return nil, err
 		}
-	} else {
-		if err := writePrefixed(t.conn, &t.writeBuf, data); err != nil {
+
+		respLength := uint32(respLenBuf[0])<<24 | uint32(respLenBuf[1])<<16 | uint32(respLenBuf[2])<<8 | uint32(respLenBuf[3])
+		if respLength > 50*1024*1024 {
+			t.mu.Unlock()
+			return nil, fmt.Errorf("response too large: %d", respLength)
+		}
+
+		resp := make([]byte, respLength)
+		if _, err := io.ReadFull(t.conn, resp); err != nil {
+			t.mu.Unlock()
+			if isNetworkError(err) && attempt == 0 {
+				t.resetConnection()
+				continue
+			}
 			return nil, err
 		}
+
+		t.mu.Unlock()
+
+		if t.decCipher != nil {
+			decrypted, err := t.decCipher.decryptFrame(resp)
+			if err != nil {
+				return nil, err
+			}
+			return decrypted, nil
+		}
+		return resp, nil
 	}
 
-	var respLenBuf [4]byte
-	t.conn.SetReadDeadline(time.Now().Add(t.timeout))
-	if _, err := io.ReadFull(t.conn, respLenBuf[:]); err != nil {
-		return nil, err
-	}
-
-	respLength := uint32(respLenBuf[0])<<24 | uint32(respLenBuf[1])<<16 | uint32(respLenBuf[2])<<8 | uint32(respLenBuf[3])
-	if respLength > 50*1024*1024 {
-		return nil, fmt.Errorf("response too large: %d", respLength)
-	}
-
-	resp := make([]byte, respLength)
-	if _, err := io.ReadFull(t.conn, resp); err != nil {
-		return nil, err
-	}
-
-	if t.decCipher != nil {
-		return t.decCipher.decryptFrame(resp)
-	}
-	return resp, nil
+	return nil, fmt.Errorf("send failed after reconnect")
 }
 
 func (t *tcpClientTransport) sendAsync(data []byte) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.encCipher != nil {
-		return t.encCipher.encryptAndWrite(t.conn, &t.writeBuf, data)
+	for attempt := 0; attempt < 2; attempt++ {
+		t.mu.Lock()
+
+		if atomic.LoadInt32(&t.connected) == 0 || t.conn == nil {
+			t.mu.Unlock()
+			if err := t.connect(t.addr); err != nil {
+				return err
+			}
+			continue
+		}
+
+		var err error
+		if t.encCipher != nil {
+			err = t.encCipher.encryptAndWrite(t.conn, &t.writeBuf, data)
+		} else {
+			err = writePrefixed(t.conn, &t.writeBuf, data)
+		}
+
+		if err != nil {
+			t.mu.Unlock()
+			if isNetworkError(err) && attempt == 0 {
+				t.resetConnection()
+				continue
+			}
+			return err
+		}
+
+		t.mu.Unlock()
+		return nil
 	}
-	return writePrefixed(t.conn, &t.writeBuf, data)
+
+	return fmt.Errorf("sendAsync failed after reconnect")
 }
 
 func (t *tcpClientTransport) close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	atomic.StoreInt32(&t.connected, 0)
 	if t.conn != nil {
-		return t.conn.Close()
+		err := t.conn.Close()
+		t.conn = nil
+		t.encCipher = nil
+		t.decCipher = nil
+		return err
 	}
 	return nil
 }
