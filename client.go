@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1196,6 +1194,3 @@ func (tx *remoteTransaction) GetID() string {
 	return tx.id
 }
 
-func generateDocID() string {
-	return strconv.FormatInt(time.Now().UnixNano(), 36) + "_" + strconv.FormatInt(rand.Int63(), 36)
-}
