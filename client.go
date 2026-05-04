@@ -14,6 +14,18 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+var clientDebug atomic.Bool
+
+func SetClientLogging(enabled bool) {
+	clientDebug.Store(enabled)
+}
+
+func clientLogf(format string, args ...interface{}) {
+	if clientDebug.Load() {
+		fmt.Printf("[ALOS CLIENT] "+format+"\n", args...)
+	}
+}
+
 const (
 	defaultBatchSize            = 100
 	defaultFlushInterval        = 1 * time.Millisecond
