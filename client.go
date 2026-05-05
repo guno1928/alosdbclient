@@ -26,6 +26,9 @@ func clientLogf(format string, args ...interface{}) {
 	}
 }
 
+func clientLogfFast(format string, args ...interface{}) {
+}
+
 const (
 	defaultBatchSize            = 100
 	defaultFlushInterval        = 1 * time.Millisecond
@@ -567,22 +570,12 @@ func (c *Client) call(op opCode, collName string, args interface{}) (*response, 
 		}
 	}
 
-	timer := time.NewTimer(c.timeout)
-	select {
-	case resp := <-respChan:
-		timer.Stop()
-		respChanPool.Put(respChan)
-		if resp.Error != "" {
-			return nil, errors.New(resp.Error)
-		}
-		return resp, nil
-	case <-timer.C:
-		go func() {
-			<-respChan
-			respChanPool.Put(respChan)
-		}()
-		return nil, errors.New("request timeout")
+	resp := <-respChan
+	respChanPool.Put(respChan)
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
 	}
+	return resp, nil
 }
 
 func (c *Client) callDirect(op opCode, collName string, args interface{}) (*response, error) {
@@ -631,6 +624,38 @@ func (c *Client) callDirect(op opCode, collName string, args interface{}) (*resp
 	return &resp, nil
 }
 
+func (c *Client) callAsync(op opCode, collName string, args interface{}) error {
+	enc := getEncoder()
+	if err := enc.encoder.Encode(args); err != nil {
+		putEncoder(enc)
+		return err
+	}
+	src := enc.buffer.Bytes()
+	argsData := make([]byte, len(src))
+	copy(argsData, src)
+	putEncoder(enc)
+
+	req := request{
+		ID:         c.reqID.Add(1),
+		Op:         op,
+		Collection: collName,
+		Args:       argsData,
+		AuthToken:  c.authToken,
+		Database:   c.dbName,
+		NoReply:    true,
+	}
+
+	reqEnc := getEncoder()
+	if err := reqEnc.encoder.Encode(req); err != nil {
+		putEncoder(reqEnc)
+		return err
+	}
+
+	err := c.transport.sendAsync(reqEnc.buffer.Bytes())
+	putEncoder(reqEnc)
+	return err
+}
+
 type remoteCollection struct {
 	client *Client
 	name   string
@@ -658,8 +683,6 @@ func (rc *remoteCollection) InsertOne(doc Document) (string, error) {
 	}
 	id := doc.GetID()
 
-	// Use callDirect with raw doc. The server expects types.Document
-	// (map[string]interface{}) not a wrapper struct like insertOneArgs.
 	resp, err := rc.client.callDirect(opInsertOne, rc.name, doc)
 	if err != nil {
 		return "", err
@@ -681,7 +704,7 @@ func (rc *remoteCollection) InsertOne(doc Document) (string, error) {
 
 func (rc *remoteCollection) InsertMany(docs []Document) ([]string, error) {
 	ids := make([]string, len(docs))
-	offsets := make([]uint32, len(docs))
+	offsets := make([]uint32, len(docs)+1)
 
 	enc := getEncoder()
 	for i, doc := range docs {
@@ -694,6 +717,7 @@ func (rc *remoteCollection) InsertMany(docs []Document) ([]string, error) {
 			ids[i] = doc.GetID()
 		}
 	}
+	offsets[len(docs)] = uint32(enc.buffer.Len())
 	blob := make([]byte, enc.buffer.Len())
 	copy(blob, enc.buffer.Bytes())
 	putEncoder(enc)
@@ -708,6 +732,10 @@ func (rc *remoteCollection) InsertMany(docs []Document) ([]string, error) {
 	}
 
 	rc.invalidateCache()
+
+	if resp == nil || len(resp.Result) == 0 {
+		return ids, nil
+	}
 
 	var result struct {
 		IDs []string `msgpack:"ids"`
@@ -733,7 +761,7 @@ func (rc *remoteCollection) FindOne(query Document) (Document, error) {
 			}
 		}
 
-		resp, err := rc.client.call(opFindByID, rc.name, findByIDArgs{ID: id})
+		resp, err := rc.client.callDirect(opFindByID, rc.name, findByIDArgs{ID: id})
 		if err != nil {
 			return nil, err
 		}
@@ -756,7 +784,7 @@ func (rc *remoteCollection) FindOne(query Document) (Document, error) {
 		}
 	}
 
-	resp, err := rc.client.call(opFindOne, rc.name, findArgs{Query: query})
+	resp, err := rc.client.callDirect(opFindOne, rc.name, findArgs{Query: query})
 	if err != nil {
 		return nil, err
 	}
@@ -784,7 +812,7 @@ func (rc *remoteCollection) FindMany(query Document) ([]Document, error) {
 		}
 	}
 
-	resp, err := rc.client.call(opFind, rc.name, findArgs{Query: query})
+	resp, err := rc.client.callDirect(opFind, rc.name, findArgs{Query: query})
 	if err != nil {
 		return nil, err
 	}
@@ -804,13 +832,13 @@ func (rc *remoteCollection) FindManyReadonly(query Document) ([]Document, error)
 }
 
 func (rc *remoteCollection) UpdateOne(filter Document, update Document) error {
-	_, err := rc.client.call(opUpdateOne, rc.name, updateArgs{Filter: filter, Update: update})
+	_, err := rc.client.callDirect(opUpdateOne, rc.name, updateArgs{Filter: filter, Update: update})
 	rc.invalidateCache()
 	return err
 }
 
 func (rc *remoteCollection) DeleteOne(filter Document) error {
-	_, err := rc.client.call(opDeleteOne, rc.name, deleteArgs{Filter: filter})
+	_, err := rc.client.callDirect(opDeleteOne, rc.name, deleteArgs{Filter: filter})
 	rc.invalidateCache()
 	return err
 }

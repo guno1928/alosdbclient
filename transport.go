@@ -10,15 +10,17 @@ import (
 	"time"
 )
 
-var readBufPool sync.Pool
+var readBufPool = sync.Pool{New: func() any { return new([]byte) }}
 
 func getNetBuf(size int) []byte {
-	if bp := readBufPool.Get(); bp != nil {
-		b := *bp.(*[]byte)
-		if cap(b) >= size {
-			return b[:size]
-		}
+	bp := readBufPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) >= size {
+		*bp = nil
+		readBufPool.Put(bp)
+		return b[:size]
 	}
+	readBufPool.Put(bp)
 	return make([]byte, size)
 }
 
@@ -26,14 +28,19 @@ func putNetBuf(b []byte) {
 	if cap(b) == 0 {
 		return
 	}
-	b = b[:cap(b)]
-	readBufPool.Put(&b)
+	bp := readBufPool.Get().(*[]byte)
+	*bp = b[:cap(b)]
+	readBufPool.Put(bp)
 }
 
 func writePrefixed(w io.Writer, writeBuf *[]byte, data []byte) error {
 	needed := 4 + len(data)
 	if cap(*writeBuf) < needed {
-		*writeBuf = make([]byte, needed)
+		if needed <= 4096 {
+			*writeBuf = getNetBuf(needed)[:needed]
+		} else {
+			*writeBuf = make([]byte, needed)
+		}
 	}
 	buf := (*writeBuf)[:needed]
 	n := uint32(len(data))
@@ -42,7 +49,8 @@ func writePrefixed(w io.Writer, writeBuf *[]byte, data []byte) error {
 	buf[2] = byte(n >> 8)
 	buf[3] = byte(n)
 	copy(buf[4:], data)
-	return writeAll(w, buf)
+	_, err := w.Write(buf)
+	return err
 }
 
 type clientTransport interface {
@@ -54,8 +62,7 @@ type clientTransport interface {
 
 type pooledTransport struct {
 	transports []clientTransport
-	counter    uint32
-	mu         sync.Mutex
+	counter    atomic.Uint32
 }
 
 func newPooledTransport(serverAddr string, poolSize int, psk []byte) (clientTransport, error) {
@@ -99,25 +106,19 @@ func (p *pooledTransport) connect(addr string) error {
 }
 
 func (p *pooledTransport) send(data []byte) ([]byte, error) {
-	p.mu.Lock()
-	idx := p.counter % uint32(len(p.transports))
-	p.counter++
-	p.mu.Unlock()
+	idx := (p.counter.Add(1) - 1) % uint32(len(p.transports))
 	resp, err := p.transports[idx].send(data)
 	if err != nil {
-		clientLogf("pooledTransport.send poolIdx=%d FAILED: %v", idx, err)
+		clientLogfFast("pooledTransport.send poolIdx=%d FAILED: %v", idx, err)
 	}
 	return resp, err
 }
 
 func (p *pooledTransport) sendAsync(data []byte) error {
-	p.mu.Lock()
-	idx := p.counter % uint32(len(p.transports))
-	p.counter++
-	p.mu.Unlock()
+	idx := (p.counter.Add(1) - 1) % uint32(len(p.transports))
 	err := p.transports[idx].sendAsync(data)
 	if err != nil {
-		clientLogf("pooledTransport.sendAsync poolIdx=%d FAILED: %v", idx, err)
+		clientLogfFast("pooledTransport.sendAsync poolIdx=%d FAILED: %v", idx, err)
 	}
 	return err
 }
@@ -274,31 +275,23 @@ func (t *tcpClientTransport) resetConnection() {
 
 func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		clientLogf("tcpTransport.send START attempt=%d addr=%s dataLen=%d", attempt, t.addr, len(data))
-
 		t.mu.Lock()
 
 		if atomic.LoadInt32(&t.connected) == 0 || t.conn == nil {
 			t.mu.Unlock()
-			clientLogf("tcpTransport.send NOT_CONNECTED attempt=%d addr=%s connected=%d conn=%v", attempt, t.addr, atomic.LoadInt32(&t.connected), t.conn)
 			if err := t.connect(t.addr); err != nil {
-				clientLogf("tcpTransport.send CONNECT_FAILED attempt=%d addr=%s err=%v", attempt, t.addr, err)
 				if attempt < 2 {
-					clientLogf("tcpTransport.send CONNECT_FAILED retrying after backoff attempt=%d", attempt)
 					time.Sleep(time.Duration(50*(1<<attempt)) * time.Millisecond)
 					continue
 				}
 				return nil, fmt.Errorf("send connect failed after %d attempts: %w", attempt+1, err)
 			}
-			clientLogf("tcpTransport.send CONNECT_OK attempt=%d addr=%s", attempt, t.addr)
 			continue
 		}
 
-		clientLogf("tcpTransport.send WRITING attempt=%d addr=%s enc=%v", attempt, t.addr, t.encCipher != nil)
 		if t.encCipher != nil {
 			if err := t.encCipher.encryptAndWrite(t.conn, &t.writeBuf, data); err != nil {
 				t.mu.Unlock()
-				clientLogf("tcpTransport.send WRITE_ENCRYPT_FAILED attempt=%d addr=%s err=%v class=%s", attempt, t.addr, err, classifyNetworkError(err))
 				if isNetworkError(err) && attempt < 2 {
 					t.resetConnection()
 					continue
@@ -308,7 +301,6 @@ func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
 		} else {
 			if err := writePrefixed(t.conn, &t.writeBuf, data); err != nil {
 				t.mu.Unlock()
-				clientLogf("tcpTransport.send WRITE_FAILED attempt=%d addr=%s err=%v class=%s", attempt, t.addr, err, classifyNetworkError(err))
 				if isNetworkError(err) && attempt < 2 {
 					t.resetConnection()
 					continue
@@ -317,11 +309,9 @@ func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
 			}
 		}
 
-		clientLogf("tcpTransport.send READING attempt=%d addr=%s timeout=%v", attempt, t.addr, t.timeout)
 		var respLenBuf [4]byte
 		if err := t.conn.SetReadDeadline(time.Now().Add(t.timeout)); err != nil {
 			t.mu.Unlock()
-			clientLogf("tcpTransport.send SET_DEADLINE_FAILED attempt=%d addr=%s err=%v", attempt, t.addr, err)
 			if isNetworkError(err) && attempt < 2 {
 				t.resetConnection()
 				continue
@@ -330,7 +320,6 @@ func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
 		}
 		if _, err := io.ReadFull(t.conn, respLenBuf[:]); err != nil {
 			t.mu.Unlock()
-			clientLogf("tcpTransport.send READ_LEN_FAILED attempt=%d addr=%s err=%v class=%s", attempt, t.addr, err, classifyNetworkError(err))
 			if isNetworkError(err) && attempt < 2 {
 				t.resetConnection()
 				continue
@@ -339,17 +328,15 @@ func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
 		}
 
 		respLength := uint32(respLenBuf[0])<<24 | uint32(respLenBuf[1])<<16 | uint32(respLenBuf[2])<<8 | uint32(respLenBuf[3])
-		clientLogf("tcpTransport.send READ_LEN attempt=%d addr=%s respLength=%d", attempt, t.addr, respLength)
 		if respLength > 50*1024*1024 {
 			t.mu.Unlock()
-			clientLogf("tcpTransport.send RESPONSE_TOO_LARGE attempt=%d addr=%s respLength=%d", attempt, t.addr, respLength)
 			return nil, fmt.Errorf("response too large: %d", respLength)
 		}
 
-		resp := make([]byte, respLength)
+		resp := getNetBuf(int(respLength))[:respLength]
 		if _, err := io.ReadFull(t.conn, resp); err != nil {
+			putNetBuf(resp)
 			t.mu.Unlock()
-			clientLogf("tcpTransport.send READ_BODY_FAILED attempt=%d addr=%s err=%v class=%s", attempt, t.addr, err, classifyNetworkError(err))
 			if isNetworkError(err) && attempt < 2 {
 				t.resetConnection()
 				continue
@@ -357,48 +344,38 @@ func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
 			return nil, err
 		}
 
-		clientLogf("tcpTransport.send READ_OK attempt=%d addr=%s respBytes=%d", attempt, t.addr, len(resp))
 		t.mu.Unlock()
 
 		if t.decCipher != nil {
 			decrypted, err := t.decCipher.decryptFrame(resp)
+			putNetBuf(resp)
 			if err != nil {
-				clientLogf("tcpTransport.send DECRYPT_FAILED attempt=%d addr=%s err=%v", attempt, t.addr, err)
 				return nil, err
 			}
-			clientLogf("tcpTransport.send DECRYPT_OK attempt=%d addr=%s decryptedBytes=%d", attempt, t.addr, len(decrypted))
 			return decrypted, nil
 		}
-		clientLogf("tcpTransport.send SUCCESS attempt=%d addr=%s", attempt, t.addr)
 		return resp, nil
 	}
 
-	clientLogf("tcpTransport.send ALL_ATTEMPTS_FAILED addr=%s", t.addr)
 	return nil, fmt.Errorf("send failed after 3 reconnect attempts")
 }
 
 func (t *tcpClientTransport) sendAsync(data []byte) error {
 	for attempt := 0; attempt < 3; attempt++ {
-		clientLogf("tcpTransport.sendAsync START attempt=%d addr=%s dataLen=%d", attempt, t.addr, len(data))
-
 		t.mu.Lock()
 
 		if atomic.LoadInt32(&t.connected) == 0 || t.conn == nil {
 			t.mu.Unlock()
-			clientLogf("tcpTransport.sendAsync NOT_CONNECTED attempt=%d addr=%s", attempt, t.addr)
 			if err := t.connect(t.addr); err != nil {
-				clientLogf("tcpTransport.sendAsync CONNECT_FAILED attempt=%d addr=%s err=%v", attempt, t.addr, err)
 				if attempt < 2 {
 					time.Sleep(time.Duration(50*(1<<attempt)) * time.Millisecond)
 					continue
 				}
 				return fmt.Errorf("sendAsync connect failed after %d attempts: %w", attempt+1, err)
 			}
-			clientLogf("tcpTransport.sendAsync CONNECT_OK attempt=%d addr=%s", attempt, t.addr)
 			continue
 		}
 
-		clientLogf("tcpTransport.sendAsync WRITING attempt=%d addr=%s enc=%v", attempt, t.addr, t.encCipher != nil)
 		var err error
 		if t.encCipher != nil {
 			err = t.encCipher.encryptAndWrite(t.conn, &t.writeBuf, data)
@@ -408,7 +385,6 @@ func (t *tcpClientTransport) sendAsync(data []byte) error {
 
 		if err != nil {
 			t.mu.Unlock()
-			clientLogf("tcpTransport.sendAsync WRITE_FAILED attempt=%d addr=%s err=%v class=%s", attempt, t.addr, err, classifyNetworkError(err))
 			if isNetworkError(err) && attempt < 2 {
 				t.resetConnection()
 				continue
@@ -416,12 +392,10 @@ func (t *tcpClientTransport) sendAsync(data []byte) error {
 			return err
 		}
 
-		clientLogf("tcpTransport.sendAsync SUCCESS attempt=%d addr=%s", attempt, t.addr)
 		t.mu.Unlock()
 		return nil
 	}
 
-	clientLogf("tcpTransport.sendAsync ALL_ATTEMPTS_FAILED addr=%s", t.addr)
 	return fmt.Errorf("sendAsync failed after 3 reconnect attempts")
 }
 

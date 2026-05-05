@@ -185,13 +185,6 @@ func performClientHandshake(conn net.Conn, psk []byte, timeout time.Duration) (*
 }
 
 func writeAll(w io.Writer, data []byte) error {
-	written := 0
-	for written < len(data) {
-		n, err := w.Write(data[written:])
-		if err != nil {
-			return err
-		}
-		written += n
-	}
-	return nil
+	_, err := w.Write(data)
+	return err
 }
