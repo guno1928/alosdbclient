@@ -978,6 +978,17 @@ func (db *remoteDatabase) Collection(name string) CollectionInterface {
 	}
 }
 
+func (db *remoteDatabase) CreateCollection(name string) error {
+	resp, err := db.client.callDirect(opCreateCollection, "", existsArgs{Name: name})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
 func (db *remoteDatabase) ListCollections() []string {
 	return nil
 }

@@ -26,6 +26,7 @@ const (
 	opUpsertMany        opCode = 18
 	opDBExists          opCode = 19
 	opCollectionExists  opCode = 20
+	opCreateCollection  opCode = 23
 )
 
 type batchRequest struct {

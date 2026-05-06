@@ -38,6 +38,7 @@ type CollectionInterface interface {
 // DatabaseInterface defines the operations available on a database instance.
 type DatabaseInterface interface {
 	Collection(name string) CollectionInterface
+	CreateCollection(name string) error
 	ListCollections() []string
 	GetStats() map[string]interface{}
 	Close() error
