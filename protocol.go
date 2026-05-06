@@ -27,6 +27,7 @@ const (
 	opDBExists          opCode = 19
 	opCollectionExists  opCode = 20
 	opCreateCollection  opCode = 23
+	opAggregate         opCode = 24
 )
 
 type batchRequest struct {
@@ -121,4 +122,8 @@ type txResult struct {
 	Success bool   `msgpack:"success"`
 	Error   string `msgpack:"error,omitempty"`
 	ID      string `msgpack:"id,omitempty"`
+}
+
+type aggregateArgs struct {
+	Pipeline []map[string]interface{} `msgpack:"pipeline"`
 }

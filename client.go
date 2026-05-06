@@ -963,7 +963,19 @@ func (rc *remoteCollection) UpsertMany(filter Document, update Document) (int, i
 }
 
 func (rc *remoteCollection) Aggregate(pipeline []Document) ([]Document, error) {
-	return nil, fmt.Errorf("aggregate not supported over network")
+	pl := make([]map[string]interface{}, len(pipeline))
+	for i, stage := range pipeline {
+		pl[i] = map[string]interface{}(stage)
+	}
+	resp, err := rc.client.callDirect(opAggregate, rc.name, aggregateArgs{Pipeline: pl})
+	if err != nil {
+		return nil, err
+	}
+	var docs []Document
+	if err := msgpack.Unmarshal(resp.Result, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
 }
 
 type remoteDatabase struct {
