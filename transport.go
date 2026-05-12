@@ -350,6 +350,10 @@ func (t *tcpClientTransport) send(data []byte) ([]byte, error) {
 			decrypted, err := t.decCipher.decryptFrame(resp)
 			putNetBuf(resp)
 			if err != nil {
+				if errors.Is(err, errReplayDetected) && attempt < 2 {
+					t.resetConnection()
+					continue
+				}
 				return nil, err
 			}
 			return decrypted, nil
