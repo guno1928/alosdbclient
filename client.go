@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,7 +31,6 @@ func clientLogfFast(format string, args ...interface{}) {
 const (
 	defaultBatchSize            = 100
 	defaultFlushInterval        = 1 * time.Millisecond
-	defaultClientCacheTTL       = 135 * time.Millisecond
 	defaultClientRequestTimeout = 15 * time.Second
 )
 
@@ -48,9 +46,6 @@ const (
 //
 // RequestTimeout is the per-request timeout. Default is 15 seconds.
 //
-// CacheTTL is the client cache time-to-live. Default is 135 milliseconds.
-//
-// DisableCache disables client-side caching.
 //
 // FireAndForget sends requests without waiting for a response.
 type ClientConfig struct {
@@ -59,8 +54,6 @@ type ClientConfig struct {
 	Username       string
 	Password       string
 	RequestTimeout time.Duration
-	CacheTTL       time.Duration
-	DisableCache   bool
 	FireAndForget  bool
 }
 
@@ -70,7 +63,6 @@ func DefaultClientConfig(serverAddr string) *ClientConfig {
 		ServerAddr:     serverAddr,
 		PoolSize:       10,
 		RequestTimeout: defaultClientRequestTimeout,
-		CacheTTL:       defaultClientCacheTTL,
 	}
 }
 
@@ -79,126 +71,14 @@ type pendingRequest struct {
 	respChan chan *response
 }
 
-type cacheEntry struct {
-	data      []byte
-	expiresAt time.Time
-	gen       uint64
-}
 
-type clientCache struct {
-	mu      sync.RWMutex
-	entries map[string]cacheEntry
-	ttl     time.Duration
-	gen     uint64
-	stopCh  chan struct{}
-}
 
-func newClientCache(ttl time.Duration) *clientCache {
-	if ttl <= 0 {
-		return nil
-	}
-	c := &clientCache{
-		entries: make(map[string]cacheEntry),
-		ttl:     ttl,
-		stopCh:  make(chan struct{}),
-	}
-	go c.cleanupLoop()
-	return c
-}
 
-func (c *clientCache) get(key string) ([]byte, bool) {
-	if c == nil {
-		return nil, false
-	}
-	c.mu.RLock()
-	entry, ok := c.entries[key]
-	gen := c.gen
-	c.mu.RUnlock()
 
-	if !ok {
-		return nil, false
-	}
-	if entry.gen < gen {
-		return nil, false
-	}
-	if time.Now().After(entry.expiresAt) {
-		c.mu.Lock()
-		delete(c.entries, key)
-		c.mu.Unlock()
-		return nil, false
-	}
-	return entry.data, true
-}
 
-func (c *clientCache) set(key string, data []byte) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.entries[key] = cacheEntry{
-		data:      data,
-		expiresAt: time.Now().Add(c.ttl),
-		gen:       c.gen,
-	}
-	c.mu.Unlock()
-}
 
-func (c *clientCache) invalidate(prefix string) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	for key := range c.entries {
-		if strings.HasPrefix(key, prefix) {
-			delete(c.entries, key)
-		}
-	}
-	c.mu.Unlock()
-}
 
-func (c *clientCache) invalidateAll() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.gen++
-	c.mu.Unlock()
-}
 
-func (c *clientCache) cleanupLoop() {
-	if c == nil {
-		return
-	}
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			now := time.Now()
-			c.mu.Lock()
-			for key, entry := range c.entries {
-				if now.After(entry.expiresAt) {
-					delete(c.entries, key)
-				}
-			}
-			c.mu.Unlock()
-		case <-c.stopCh:
-			return
-		}
-	}
-}
-
-func (c *clientCache) stop() {
-	if c == nil {
-		return
-	}
-	select {
-	case <-c.stopCh:
-	default:
-		close(c.stopCh)
-	}
-}
 
 // Client manages a connection to a remote ALOS DB server.
 type Client struct {
@@ -214,7 +94,6 @@ type Client struct {
 	flushChan     chan bool
 	stopFlush     chan bool
 	flushWg       sync.WaitGroup
-	cache         *clientCache
 	authToken     string
 	psk           []byte
 	fireAndForget bool
@@ -265,33 +144,7 @@ func WithTimeout(timeout time.Duration) ClientOption {
 	}
 }
 
-// WithCacheTTL sets the cache time-to-live for the client.
-//
-// Example:
-//
-//	db, err := alosdbclient.Connect("localhost:6900", alosdbclient.WithCacheTTL(200*time.Millisecond))
-func WithCacheTTL(ttl time.Duration) ClientOption {
-	return func(c *Client) {
-		if c.cache != nil {
-			c.cache.stop()
-		}
-		c.cache = newClientCache(ttl)
-	}
-}
 
-// WithoutCache disables client-side caching entirely.
-//
-// Example:
-//
-//	db, err := alosdbclient.Connect("localhost:6900", alosdbclient.WithoutCache())
-func WithoutCache() ClientOption {
-	return func(c *Client) {
-		if c.cache != nil {
-			c.cache.stop()
-		}
-		c.cache = nil
-	}
-}
 
 // WithDatabase sets the target database name for all requests.
 //
@@ -345,10 +198,6 @@ func newClientWithConfig(config *ClientConfig, opts ...ClientOption) (*Client, e
 		requestTimeout = defaultClientRequestTimeout
 	}
 
-	cacheTTL := config.CacheTTL
-	if cacheTTL <= 0 && !config.DisableCache {
-		cacheTTL = defaultClientCacheTTL
-	}
 
 	var psk []byte
 	var authToken string
@@ -374,13 +223,9 @@ func newClientWithConfig(config *ClientConfig, opts ...ClientOption) (*Client, e
 		flushInterval: defaultFlushInterval,
 		flushChan:     make(chan bool, 1),
 		stopFlush:     make(chan bool),
-		cache:         newClientCache(cacheTTL),
 		authToken:     authToken,
 		psk:           psk,
 		fireAndForget: config.FireAndForget,
-	}
-	if config.DisableCache {
-		c.cache = nil
 	}
 
 	for _, opt := range opts {
@@ -388,9 +233,6 @@ func newClientWithConfig(config *ClientConfig, opts ...ClientOption) (*Client, e
 	}
 
 	if c.optionErr != nil {
-		if c.cache != nil {
-			c.cache.stop()
-		}
 		if c.transport != nil {
 			_ = c.transport.close()
 		}
@@ -414,9 +256,6 @@ func (c *Client) Close() {
 	close(c.stopFlush)
 	c.flushWg.Wait()
 
-	if c.cache != nil {
-		c.cache.stop()
-	}
 
 	if c.transport != nil {
 		c.transport.close()
@@ -661,18 +500,7 @@ type remoteCollection struct {
 	name   string
 }
 
-func (rc *remoteCollection) cacheKey(op string, query Document) string {
-	if rc.client == nil || rc.client.cache == nil {
-		return ""
-	}
-	return rc.name + ":" + op + ":" + fmt.Sprint(query)
-}
 
-func (rc *remoteCollection) invalidateCache() {
-	if rc.client != nil && rc.client.cache != nil {
-		rc.client.cache.invalidate(rc.name + ":")
-	}
-}
 
 // InsertOne inserts a single document. In async mode the ID is pre-generated
 // client-side before sending, so the returned ID is always valid even when
@@ -687,7 +515,6 @@ func (rc *remoteCollection) InsertOne(doc Document) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rc.invalidateCache()
 
 	// In async mode the server sends an empty ack; the actual result is
 	// processed in the background and not returned. Return the pre-gen ID.
@@ -731,7 +558,6 @@ func (rc *remoteCollection) InsertMany(docs []Document) ([]string, error) {
 		return nil, err
 	}
 
-	rc.invalidateCache()
 
 	if resp == nil || len(resp.Result) == 0 {
 		return ids, nil
@@ -753,14 +579,6 @@ func (rc *remoteCollection) InsertManyRaw(rawDataMap map[string][]byte) error {
 func (rc *remoteCollection) FindOne(query Document) (Document, error) {
 	id, isIDQuery := query["_id"].(string)
 	if isIDQuery && len(query) == 1 {
-		cacheKey := rc.cacheKey("fid", query)
-		if cached, ok := rc.client.cache.get(cacheKey); ok {
-			var doc Document
-			if err := msgpack.Unmarshal(cached, &doc); err == nil {
-				return doc, nil
-			}
-		}
-
 		resp, err := rc.client.callDirect(opFindByID, rc.name, findByIDArgs{ID: id})
 		if err != nil {
 			return nil, err
@@ -770,18 +588,7 @@ func (rc *remoteCollection) FindOne(query Document) (Document, error) {
 		if err := msgpack.Unmarshal(resp.Result, &doc); err != nil {
 			return nil, err
 		}
-		if cacheKey != "" {
-			rc.client.cache.set(cacheKey, resp.Result)
-		}
 		return doc, nil
-	}
-
-	cacheKey := rc.cacheKey("fo", query)
-	if cached, ok := rc.client.cache.get(cacheKey); ok {
-		var doc Document
-		if err := msgpack.Unmarshal(cached, &doc); err == nil {
-			return doc, nil
-		}
 	}
 
 	resp, err := rc.client.callDirect(opFindOne, rc.name, findArgs{Query: query})
@@ -793,9 +600,6 @@ func (rc *remoteCollection) FindOne(query Document) (Document, error) {
 	if err := msgpack.Unmarshal(resp.Result, &doc); err != nil {
 		return nil, err
 	}
-	if cacheKey != "" {
-		rc.client.cache.set(cacheKey, resp.Result)
-	}
 	return doc, nil
 }
 
@@ -804,14 +608,6 @@ func (rc *remoteCollection) FindOneReadonly(query Document) (Document, error) {
 }
 
 func (rc *remoteCollection) FindMany(query Document) ([]Document, error) {
-	cacheKey := rc.cacheKey("fm", query)
-	if cached, ok := rc.client.cache.get(cacheKey); ok {
-		var docs []Document
-		if err := msgpack.Unmarshal(cached, &docs); err == nil {
-			return docs, nil
-		}
-	}
-
 	resp, err := rc.client.callDirect(opFind, rc.name, findArgs{Query: query})
 	if err != nil {
 		return nil, err
@@ -820,9 +616,6 @@ func (rc *remoteCollection) FindMany(query Document) ([]Document, error) {
 	var docs []Document
 	if err := msgpack.Unmarshal(resp.Result, &docs); err != nil {
 		return nil, err
-	}
-	if cacheKey != "" {
-		rc.client.cache.set(cacheKey, resp.Result)
 	}
 	return docs, nil
 }
@@ -833,13 +626,11 @@ func (rc *remoteCollection) FindManyReadonly(query Document) ([]Document, error)
 
 func (rc *remoteCollection) UpdateOne(filter Document, update Document) error {
 	_, err := rc.client.callDirect(opUpdateOne, rc.name, updateArgs{Filter: filter, Update: update})
-	rc.invalidateCache()
 	return err
 }
 
 func (rc *remoteCollection) DeleteOne(filter Document) error {
 	_, err := rc.client.callDirect(opDeleteOne, rc.name, deleteArgs{Filter: filter})
-	rc.invalidateCache()
 	return err
 }
 
@@ -851,7 +642,6 @@ func (rc *remoteCollection) DeleteMany(filter Document) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	rc.invalidateCache()
 
 	if resp != nil && len(resp.Result) > 0 {
 		var result struct {
@@ -872,7 +662,6 @@ func (rc *remoteCollection) UpdateMany(filter Document, update Document) (int, e
 	if err != nil {
 		return 0, err
 	}
-	rc.invalidateCache()
 
 	if resp != nil && len(resp.Result) > 0 {
 		var result struct {
@@ -900,7 +689,6 @@ func (rc *remoteCollection) Count() int64 {
 
 func (rc *remoteCollection) Drop() {
 	rc.client.call(opDrop, rc.name, struct{}{})
-	rc.invalidateCache()
 }
 
 func (rc *remoteCollection) GetName() string {
@@ -928,8 +716,6 @@ func (rc *remoteCollection) UpsertOne(filter Document, update Document) (bool, e
 	if err != nil {
 		return false, err
 	}
-	rc.invalidateCache()
-
 	if resp != nil && len(resp.Result) > 0 {
 		var result struct {
 			Inserted bool `msgpack:"inserted"`
@@ -948,8 +734,6 @@ func (rc *remoteCollection) UpsertMany(filter Document, update Document) (int, i
 	if err != nil {
 		return 0, 0, err
 	}
-	rc.invalidateCache()
-
 	if resp != nil && len(resp.Result) > 0 {
 		var result struct {
 			Matched  int `msgpack:"matched"`
@@ -1034,15 +818,36 @@ func (db *remoteDatabase) Close() error {
 }
 
 func (db *remoteDatabase) BeginTransaction() TransactionInterface {
+	resp, err := db.client.callDirect(opBeginTx, "", struct{}{})
+	if err != nil {
+		return &remoteTransaction{
+			db:    db,
+			state: 2,
+			err:   fmt.Errorf("failed to begin transaction: %w", err),
+		}
+	}
+
+	var result txIDResult
+	if err := msgpack.Unmarshal(resp.Result, &result); err != nil {
+		return &remoteTransaction{
+			db:    db,
+			state: 2,
+			err:   fmt.Errorf("failed to parse begin transaction response: %w", err),
+		}
+	}
+
 	return &remoteTransaction{
-		db:         db,
-		operations: make([]txOperation, 0),
-		state:      0,
+		db:    db,
+		txID:  result.TxID,
+		state: 0,
 	}
 }
 
 func (db *remoteDatabase) Transaction(fn func(tx TransactionInterface) error) error {
 	remoteTx := db.BeginTransaction()
+	if remoteTx.(*remoteTransaction).err != nil {
+		return remoteTx.(*remoteTransaction).err
+	}
 	defer remoteTx.Rollback()
 
 	if err := fn(remoteTx); err != nil {
@@ -1110,11 +915,11 @@ func ConnectWithConfig(config *ClientConfig, opts ...ClientOption) (DatabaseInte
 }
 
 type remoteTransaction struct {
-	db         *remoteDatabase
-	operations []txOperation
-	state      int
-	mu         sync.Mutex
-	id         string
+	db    *remoteDatabase
+	txID  string
+	state int
+	mu    sync.Mutex
+	err   error
 }
 
 type remoteTxCollection struct {
@@ -1130,15 +935,29 @@ func (tx *remoteTransaction) Collection(name string) TxCollectionInterface {
 }
 
 func (tc *remoteTxCollection) FindOne(query Document) (Document, error) {
-	return tc.tx.db.Collection(tc.name).FindOne(query)
+	if err := tc.tx.checkActive(); err != nil {
+		return nil, err
+	}
+
+	args := txOpArgs{
+		TxID:  tc.tx.txID,
+		Query: map[string]interface{}(query),
+	}
+	resp, err := tc.tx.db.client.callDirect(opTxFindOne, tc.name, args)
+	if err != nil {
+		return nil, err
+	}
+
+	var doc Document
+	if err := msgpack.Unmarshal(resp.Result, &doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
 }
 
 func (tc *remoteTxCollection) InsertOne(doc Document) (string, error) {
-	tc.tx.mu.Lock()
-	defer tc.tx.mu.Unlock()
-
-	if tc.tx.state != 0 {
-		return "", fmt.Errorf("transaction not active")
+	if err := tc.tx.checkActive(); err != nil {
+		return "", err
 	}
 
 	if doc.GetID() == "" {
@@ -1146,53 +965,60 @@ func (tc *remoteTxCollection) InsertOne(doc Document) (string, error) {
 	}
 	id := doc.GetID()
 
-	tc.tx.operations = append(tc.tx.operations, txOperation{
-		Op:         opInsertOne,
-		Collection: tc.name,
-		Args: map[string]interface{}{
-			"doc": map[string]interface{}(doc),
-		},
-	})
+	args := txOpArgs{
+		TxID: tc.tx.txID,
+		Doc:  map[string]interface{}(doc),
+	}
+	resp, err := tc.tx.db.client.callDirect(opTxInsertOne, tc.name, args)
+	if err != nil {
+		return "", err
+	}
 
+	var result struct {
+		ID string `msgpack:"id"`
+	}
+	if err := msgpack.Unmarshal(resp.Result, &result); err == nil && result.ID != "" {
+		return result.ID, nil
+	}
 	return id, nil
 }
 
 func (tc *remoteTxCollection) UpdateOne(filter Document, update Document) error {
-	tc.tx.mu.Lock()
-	defer tc.tx.mu.Unlock()
-
-	if tc.tx.state != 0 {
-		return fmt.Errorf("transaction not active")
+	if err := tc.tx.checkActive(); err != nil {
+		return err
 	}
 
-	tc.tx.operations = append(tc.tx.operations, txOperation{
-		Op:         opUpdateOne,
-		Collection: tc.name,
-		Args: map[string]interface{}{
-			"filter": map[string]interface{}(filter),
-			"update": map[string]interface{}(update),
-		},
-	})
-
-	return nil
+	args := txOpArgs{
+		TxID:   tc.tx.txID,
+		Filter: map[string]interface{}(filter),
+		Update: map[string]interface{}(update),
+	}
+	_, err := tc.tx.db.client.callDirect(opTxUpdateOne, tc.name, args)
+	return err
 }
 
 func (tc *remoteTxCollection) DeleteOne(filter Document) error {
-	tc.tx.mu.Lock()
-	defer tc.tx.mu.Unlock()
-
-	if tc.tx.state != 0 {
-		return fmt.Errorf("transaction not active")
+	if err := tc.tx.checkActive(); err != nil {
+		return err
 	}
 
-	tc.tx.operations = append(tc.tx.operations, txOperation{
-		Op:         opDeleteOne,
-		Collection: tc.name,
-		Args: map[string]interface{}{
-			"filter": map[string]interface{}(filter),
-		},
-	})
+	args := txOpArgs{
+		TxID:   tc.tx.txID,
+		Filter: map[string]interface{}(filter),
+	}
+	_, err := tc.tx.db.client.callDirect(opTxDeleteOne, tc.name, args)
+	return err
+}
 
+func (tx *remoteTransaction) checkActive() error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.state != 0 {
+		return fmt.Errorf("transaction not active")
+	}
+	if tx.err != nil {
+		return tx.err
+	}
 	return nil
 }
 
@@ -1204,33 +1030,10 @@ func (tx *remoteTransaction) Commit() error {
 		return fmt.Errorf("transaction not active")
 	}
 
-	if len(tx.operations) == 0 {
-		tx.state = 1
-		return nil
-	}
-
-	req := txBatchRequest{
-		Operations: tx.operations,
-	}
-
-	resp, err := tx.db.client.call(opTxBatch, "", req)
+	_, err := tx.db.client.callDirect(opTxCommit, "", txIDArgs{TxID: tx.txID})
 	if err != nil {
 		tx.state = 2
-		return fmt.Errorf("transaction failed: %w", err)
-	}
-
-	var txResp txBatchResponse
-	if err := msgpack.Unmarshal(resp.Result, &txResp); err != nil {
-		tx.state = 2
-		return fmt.Errorf("failed to parse transaction response: %w", err)
-	}
-
-	if !txResp.Success {
-		tx.state = 2
-		if txResp.RolledBack {
-			return fmt.Errorf("transaction rolled back: %s", txResp.Error)
-		}
-		return fmt.Errorf("transaction failed: %s", txResp.Error)
+		return fmt.Errorf("transaction commit failed: %w", err)
 	}
 
 	tx.state = 1
@@ -1245,15 +1048,12 @@ func (tx *remoteTransaction) Rollback() error {
 		return nil
 	}
 
+	_, _ = tx.db.client.callDirect(opTxRollback, "", txIDArgs{TxID: tx.txID})
 	tx.state = 2
-	tx.operations = nil
 	return nil
 }
 
 func (tx *remoteTransaction) GetID() string {
-	if tx.id == "" {
-		tx.id = generateDocID()
-	}
-	return tx.id
+	return tx.txID
 }
 

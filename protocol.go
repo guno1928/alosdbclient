@@ -28,6 +28,14 @@ const (
 	opCollectionExists  opCode = 20
 	opCreateCollection  opCode = 23
 	opAggregate         opCode = 24
+	opBeginTx           opCode = 25
+	opTxFindOne         opCode = 26
+	opTxFindByID        opCode = 27
+	opTxInsertOne       opCode = 28
+	opTxUpdateOne       opCode = 29
+	opTxDeleteOne       opCode = 30
+	opTxCommit          opCode = 31
+	opTxRollback        opCode = 32
 )
 
 type batchRequest struct {
@@ -126,4 +134,22 @@ type txResult struct {
 
 type aggregateArgs struct {
 	Pipeline []map[string]interface{} `msgpack:"pipeline"`
+}
+
+type txIDArgs struct {
+	TxID string `msgpack:"tx_id"`
+}
+
+type txIDResult struct {
+	TxID string `msgpack:"tx_id"`
+}
+
+type txOpArgs struct {
+	TxID       string                 `msgpack:"tx_id"`
+	Collection string                 `msgpack:"collection,omitempty"`
+	Filter     map[string]interface{} `msgpack:"filter,omitempty"`
+	Update     map[string]interface{} `msgpack:"update,omitempty"`
+	Doc        map[string]interface{} `msgpack:"doc,omitempty"`
+	Query      map[string]interface{} `msgpack:"query,omitempty"`
+	ID         string                 `msgpack:"id,omitempty"`
 }

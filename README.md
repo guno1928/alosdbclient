@@ -80,8 +80,6 @@ For server-side literal-value helpers that prevent operator injection, see the [
 | `WithBatchSize(n)` | Batch size for request pipelining |
 | `WithFlushInterval(d)` | Max time to wait before flushing a batch |
 | `WithTimeout(d)` | Per-request timeout |
-| `WithCacheTTL(d)` | Client-side cache TTL |
-| `WithoutCache()` | Disable client-side caching |
 | `WithDatabase(name)` | Target database name |
 | `WithCredentials(user, pass)` | Authentication |
 
