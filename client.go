@@ -29,9 +29,10 @@ func clientLogfFast(format string, args ...interface{}) {
 }
 
 const (
-	defaultBatchSize            = 100
+	defaultBatchSize            = 500
 	defaultFlushInterval        = 1 * time.Millisecond
 	defaultClientRequestTimeout = 15 * time.Second
+	defaultPoolSize             = 16
 )
 
 // ClientConfig configures a client connection to a remote ALOS DB server.
@@ -61,7 +62,7 @@ type ClientConfig struct {
 func DefaultClientConfig(serverAddr string) *ClientConfig {
 	return &ClientConfig{
 		ServerAddr:     serverAddr,
-		PoolSize:       10,
+		PoolSize:       defaultPoolSize,
 		RequestTimeout: defaultClientRequestTimeout,
 	}
 }
@@ -624,6 +625,40 @@ func (rc *remoteCollection) FindManyReadonly(query Document) ([]Document, error)
 	return rc.FindMany(query)
 }
 
+func (rc *remoteCollection) FindManyCount(query Document) (int, error) {
+	resp, err := rc.client.callDirect(opFindManyCount, rc.name, findArgs{Query: query})
+	if err != nil {
+		return 0, err
+	}
+	// Fast path: hand-encoded fixmap(1) "n" + numeric
+	data := resp.Result
+	if len(data) >= 4 && data[0] == 0x81 && data[1] == 0xa1 && data[2] == 'n' {
+		switch c := data[3]; {
+		case c <= 0x7f:
+			return int(c), nil
+		case c == 0xcc:
+			if len(data) >= 5 {
+				return int(data[4]), nil
+			}
+		case c == 0xcd:
+			if len(data) >= 6 {
+				return int(uint(data[4])<<8 | uint(data[5])), nil
+			}
+		case c == 0xce:
+			if len(data) >= 8 {
+				return int(uint(data[4])<<24 | uint(data[5])<<16 | uint(data[6])<<8 | uint(data[7])), nil
+			}
+		}
+	}
+	var m struct {
+		N int `msgpack:"n"`
+	}
+	if err := msgpack.Unmarshal(data, &m); err != nil {
+		return 0, err
+	}
+	return m.N, nil
+}
+
 func (rc *remoteCollection) UpdateOne(filter Document, update Document) error {
 	_, err := rc.client.callDirect(opUpdateOne, rc.name, updateArgs{Filter: filter, Update: update})
 	return err
@@ -693,6 +728,52 @@ func (rc *remoteCollection) Drop() {
 
 func (rc *remoteCollection) GetName() string {
 	return rc.name
+}
+
+func (rc *remoteCollection) CreateIndex(field string, unique bool) error {
+	type indexArgs struct {
+		Field  string `msgpack:"field"`
+		Unique bool   `msgpack:"unique"`
+	}
+	resp, err := rc.client.callDirect(opCreateIndex, rc.name, indexArgs{Field: field, Unique: unique})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
+
+func (rc *remoteCollection) DropIndex(field string) {
+	type indexArgs struct {
+		Field string `msgpack:"field"`
+	}
+	rc.client.callDirect(opDropIndex, rc.name, indexArgs{Field: field})
+}
+
+func (rc *remoteCollection) ListIndexes() []map[string]interface{} {
+	resp, err := rc.client.callDirect(opListIndexes, rc.name, struct{}{})
+	if err != nil {
+		return nil
+	}
+	var result []map[string]interface{}
+	msgpack.Unmarshal(resp.Result, &result)
+	return result
+}
+
+func (rc *remoteCollection) RebuildIndex(field string) error {
+	type indexArgs struct {
+		Field string `msgpack:"field"`
+	}
+	resp, err := rc.client.callDirect(opRebuildIndex, rc.name, indexArgs{Field: field})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
 }
 
 func (rc *remoteCollection) HasCollection() (bool, error) {

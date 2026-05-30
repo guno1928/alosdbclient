@@ -1,7 +1,6 @@
 package alosdbclient
 
 import (
-	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
@@ -15,17 +14,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ericlagergren/aegis"
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
-	gcmTagSize       = 16
-	counterSize      = 8
-	frameOverhead    = counterSize + gcmTagSize
+	tagSize          = 16
+	counterSize      = 16
+	frameOverhead    = counterSize + tagSize
 	saltSize         = 32
 	proofSize        = 32
 	handshakeMagic   = 0xAE
-	handshakeVersion = 0x01
+	handshakeVersion = 0x02
+	_aegisMask       = 0x414C4F5344424147
 )
 
 var (
@@ -40,21 +41,17 @@ type connCipher struct {
 	readCounter  uint64
 }
 
-func newConnCipher(key [32]byte) (*connCipher, error) {
-	block, err := aes.NewCipher(key[:])
+func newConnCipher(key [16]byte) (*connCipher, error) {
+	aead, err := aegis.New(key[:])
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return &connCipher{aead: gcm}, nil
+	return &connCipher{aead: aead}, nil
 }
 
 func (c *connCipher) encryptAndWrite(w io.Writer, writeBuf *[]byte, plaintext []byte) error {
 	counter := c.writeCounter.Add(1)
-	encSize := counterSize + len(plaintext) + gcmTagSize
+	encSize := counterSize + len(plaintext) + tagSize
 	needed := 4 + encSize
 
 	if cap(*writeBuf) < needed {
@@ -64,27 +61,29 @@ func (c *connCipher) encryptAndWrite(w io.Writer, writeBuf *[]byte, plaintext []
 
 	binary.BigEndian.PutUint32(buf[0:4], uint32(encSize))
 	binary.BigEndian.PutUint64(buf[4:12], counter)
+	binary.BigEndian.PutUint64(buf[12:20], counter^_aegisMask)
 
-	var nonce [12]byte
-	binary.BigEndian.PutUint64(nonce[4:], counter)
+	var nonce [16]byte
+	binary.BigEndian.PutUint64(nonce[:8], counter)
+	binary.BigEndian.PutUint64(nonce[8:], counter^_aegisMask)
 
 	sealed := c.aead.Seal(buf, nonce[:], plaintext, nil)
 	return writeAll(w, sealed)
 }
 
 func (c *connCipher) decryptFrame(encData []byte) ([]byte, error) {
-	if len(encData) < counterSize+gcmTagSize {
+	if len(encData) < counterSize+tagSize {
 		return nil, errFrameTooShort
 	}
 
-	counter := binary.BigEndian.Uint64(encData[:counterSize])
+	counter := binary.BigEndian.Uint64(encData[:8])
 	if counter <= c.readCounter {
 		return nil, errReplayDetected
 	}
 	c.readCounter = counter
 
-	var nonce [12]byte
-	binary.BigEndian.PutUint64(nonce[4:], counter)
+	var nonce [16]byte
+	copy(nonce[:], encData[:counterSize])
 
 	plaintext, err := c.aead.Open(nil, nonce[:], encData[counterSize:], nil)
 	if err != nil {
@@ -93,12 +92,21 @@ func (c *connCipher) decryptFrame(encData []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-func deriveKeys(psk, clientSalt, serverSalt []byte) (c2sKey, s2cKey, proofKey [32]byte, err error) {
+func deriveKeys(psk, clientSalt, serverSalt []byte) (c2sKey, s2cKey [16]byte, proofKey [32]byte, err error) {
 	combined := make([]byte, 0, len(clientSalt)+len(serverSalt))
 	combined = append(combined, clientSalt...)
 	combined = append(combined, serverSalt...)
 
-	extract := func(info string) ([32]byte, error) {
+	extract16 := func(info string) ([16]byte, error) {
+		var key [16]byte
+		r := hkdf.New(sha256.New, psk, combined, []byte(info))
+		if _, err := io.ReadFull(r, key[:]); err != nil {
+			return key, err
+		}
+		return key, nil
+	}
+
+	extract32 := func(info string) ([32]byte, error) {
 		var key [32]byte
 		r := hkdf.New(sha256.New, psk, combined, []byte(info))
 		if _, err := io.ReadFull(r, key[:]); err != nil {
@@ -107,15 +115,15 @@ func deriveKeys(psk, clientSalt, serverSalt []byte) (c2sKey, s2cKey, proofKey [3
 		return key, nil
 	}
 
-	c2sKey, err = extract("alosdb-c2s-v1")
+	c2sKey, err = extract16("alosdb-c2s-v1")
 	if err != nil {
 		return
 	}
-	s2cKey, err = extract("alosdb-s2c-v1")
+	s2cKey, err = extract16("alosdb-s2c-v1")
 	if err != nil {
 		return
 	}
-	proofKey, err = extract("alosdb-proof-v1")
+	proofKey, err = extract32("alosdb-proof-v1")
 	return
 }
 

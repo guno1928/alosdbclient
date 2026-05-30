@@ -43,6 +43,9 @@ func Arr(items ...interface{}) []interface{} {
 			panic(fmt.Sprintf("alosdbclient.Arr: %v", err))
 		}
 	}
+	if items == nil {
+		return []interface{}{}
+	}
 	return items
 }
 

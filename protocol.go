@@ -36,6 +36,11 @@ const (
 	opTxDeleteOne       opCode = 30
 	opTxCommit          opCode = 31
 	opTxRollback        opCode = 32
+	opFindManyCount     opCode = 33
+	opCreateIndex       opCode = 34
+	opDropIndex         opCode = 35
+	opListIndexes       opCode = 36
+	opRebuildIndex      opCode = 37
 )
 
 type batchRequest struct {

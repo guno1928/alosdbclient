@@ -22,6 +22,7 @@ type CollectionInterface interface {
 	FindOneReadonly(query Document) (Document, error)
 	FindMany(query Document) ([]Document, error)
 	FindManyReadonly(query Document) ([]Document, error)
+	FindManyCount(query Document) (int, error)
 	UpdateOne(filter Document, update Document) error
 	DeleteOne(filter Document) error
 	DeleteMany(filter Document) (int, error)
