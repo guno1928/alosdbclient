@@ -34,6 +34,10 @@ type CollectionInterface interface {
 	Drop()
 	GetName() string
 	HasCollection() (bool, error)
+	CreateIndex(field string, unique bool) error
+	DropIndex(field string)
+	ListIndexes() []map[string]interface{}
+	RebuildIndex(field string) error
 }
 
 // DatabaseInterface defines the operations available on a database instance.

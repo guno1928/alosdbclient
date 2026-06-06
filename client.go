@@ -536,14 +536,15 @@ func (rc *remoteCollection) InsertMany(docs []Document) ([]string, error) {
 
 	enc := getEncoder()
 	for i, doc := range docs {
+		if doc.GetID() == "" {
+			doc["_id"] = generateDocID()
+		}
 		offsets[i] = uint32(enc.buffer.Len())
 		if err := enc.encoder.Encode(doc); err != nil {
 			putEncoder(enc)
 			return nil, err
 		}
-		if doc.GetID() != "" {
-			ids[i] = doc.GetID()
-		}
+		ids[i] = doc.GetID()
 	}
 	offsets[len(docs)] = uint32(enc.buffer.Len())
 	blob := make([]byte, enc.buffer.Len())
