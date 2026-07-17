@@ -14,6 +14,11 @@ func (d Document) GetID() string {
 }
 
 // CollectionInterface defines the operations available on a document collection.
+type StreamOptions struct {
+	Fields    []string
+	BatchSize int
+}
+
 type CollectionInterface interface {
 	InsertOne(doc Document) (string, error)
 	InsertMany(docs []Document) ([]string, error)
@@ -22,6 +27,8 @@ type CollectionInterface interface {
 	FindOneReadonly(query Document) (Document, error)
 	FindMany(query Document) ([]Document, error)
 	FindManyReadonly(query Document) ([]Document, error)
+	FindManyProjected(query Document, fields []string) ([]Document, error)
+	FindManyStream(query Document, opts StreamOptions, fn func([]Document) error) error
 	FindManyCount(query Document) (int, error)
 	UpdateOne(filter Document, update Document) error
 	DeleteOne(filter Document) error

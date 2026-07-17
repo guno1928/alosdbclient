@@ -41,6 +41,8 @@ const (
 	opDropIndex         opCode = 35
 	opListIndexes       opCode = 36
 	opRebuildIndex      opCode = 37
+	opReadTS            opCode = 38
+	opFindManyStream    opCode = 39
 )
 
 type batchRequest struct {
@@ -85,7 +87,15 @@ type insertManyArgs struct {
 }
 
 type findArgs struct {
-	Query map[string]interface{} `msgpack:"query"`
+	Query  map[string]interface{} `msgpack:"query"`
+	Fields []string               `msgpack:"fields,omitempty"`
+	Limit  int                    `msgpack:"limit,omitempty"`
+	Cursor []byte                 `msgpack:"cursor,omitempty"`
+}
+
+type streamResult struct {
+	Docs   msgpack.RawMessage `msgpack:"docs"`
+	Cursor []byte             `msgpack:"cursor,omitempty"`
 }
 
 type findByIDArgs struct {

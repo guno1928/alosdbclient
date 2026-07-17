@@ -626,6 +626,51 @@ func (rc *remoteCollection) FindManyReadonly(query Document) ([]Document, error)
 	return rc.FindMany(query)
 }
 
+func (rc *remoteCollection) FindManyProjected(query Document, fields []string) ([]Document, error) {
+	if len(fields) == 0 {
+		return rc.FindMany(query)
+	}
+	resp, err := rc.client.callDirect(opFind, rc.name, findArgs{Query: query, Fields: fields})
+	if err != nil {
+		return nil, err
+	}
+	var docs []Document
+	if err := msgpack.Unmarshal(resp.Result, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
+func (rc *remoteCollection) FindManyStream(query Document, opts StreamOptions, fn func([]Document) error) error {
+	var cursor []byte
+	for {
+		req := findArgs{Query: query, Fields: opts.Fields, Limit: opts.BatchSize, Cursor: cursor}
+		resp, err := rc.client.callDirect(opFindManyStream, rc.name, req)
+		if err != nil {
+			return err
+		}
+		var sr streamResult
+		if err := msgpack.Unmarshal(resp.Result, &sr); err != nil {
+			return err
+		}
+		if len(sr.Docs) > 0 {
+			var docs []Document
+			if err := msgpack.Unmarshal(sr.Docs, &docs); err != nil {
+				return err
+			}
+			if len(docs) > 0 {
+				if err := fn(docs); err != nil {
+					return err
+				}
+			}
+		}
+		if len(sr.Cursor) == 0 {
+			return nil
+		}
+		cursor = sr.Cursor
+	}
+}
+
 func (rc *remoteCollection) FindManyCount(query Document) (int, error) {
 	resp, err := rc.client.callDirect(opFindManyCount, rc.name, findArgs{Query: query})
 	if err != nil {
