@@ -28,6 +28,8 @@ type CollectionInterface interface {
 	FindMany(query Document) ([]Document, error)
 	FindManyReadonly(query Document) ([]Document, error)
 	FindManyProjected(query Document, fields []string) ([]Document, error)
+	FindPaginated(query Document, skip, limit int) ([]Document, error)
+	FindPaginatedProjected(query Document, fields []string, skip, limit int) ([]Document, error)
 	FindManyStream(query Document, opts StreamOptions, fn func([]Document) error) error
 	FindManyCount(query Document) (int, error)
 	UpdateOne(filter Document, update Document) error

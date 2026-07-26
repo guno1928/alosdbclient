@@ -622,6 +622,37 @@ func (rc *remoteCollection) FindMany(query Document) ([]Document, error) {
 	return docs, nil
 }
 
+// FindPaginated returns one explicitly bounded page: it skips the first skip
+// matching documents and returns at most limit of them. FindMany applies a
+// server-side default cap and truncates silently once a result set exceeds it,
+// so paging is the way to read a large result set completely.
+func (rc *remoteCollection) FindPaginated(query Document, skip, limit int) ([]Document, error) {
+	resp, err := rc.client.callDirect(opFindPaginated, rc.name,
+		findArgs{Query: query, Skip: skip, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	var docs []Document
+	if err := msgpack.Unmarshal(resp.Result, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
+// FindPaginatedProjected is FindPaginated with server-side field projection.
+func (rc *remoteCollection) FindPaginatedProjected(query Document, fields []string, skip, limit int) ([]Document, error) {
+	resp, err := rc.client.callDirect(opFindPaginated, rc.name,
+		findArgs{Query: query, Fields: fields, Skip: skip, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	var docs []Document
+	if err := msgpack.Unmarshal(resp.Result, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
 func (rc *remoteCollection) FindManyReadonly(query Document) ([]Document, error) {
 	return rc.FindMany(query)
 }
@@ -726,10 +757,10 @@ func (rc *remoteCollection) DeleteMany(filter Document) (int, error) {
 
 	if resp != nil && len(resp.Result) > 0 {
 		var result struct {
-			Deleted int `msgpack:"deleted"`
+			Count int `msgpack:"count"`
 		}
 		if err := msgpack.Unmarshal(resp.Result, &result); err == nil {
-			return result.Deleted, nil
+			return result.Count, nil
 		}
 	}
 	return 0, nil
@@ -746,10 +777,10 @@ func (rc *remoteCollection) UpdateMany(filter Document, update Document) (int, e
 
 	if resp != nil && len(resp.Result) > 0 {
 		var result struct {
-			Updated int `msgpack:"updated"`
+			Count int `msgpack:"count"`
 		}
 		if err := msgpack.Unmarshal(resp.Result, &result); err == nil {
-			return result.Updated, nil
+			return result.Count, nil
 		}
 	}
 	return 0, nil

@@ -43,6 +43,7 @@ const (
 	opRebuildIndex      opCode = 37
 	opReadTS            opCode = 38
 	opFindManyStream    opCode = 39
+	opFindPaginated     opCode = 40
 )
 
 type batchRequest struct {
@@ -91,6 +92,7 @@ type findArgs struct {
 	Fields []string               `msgpack:"fields,omitempty"`
 	Limit  int                    `msgpack:"limit,omitempty"`
 	Cursor []byte                 `msgpack:"cursor,omitempty"`
+	Skip   int                    `msgpack:"skip,omitempty"`
 }
 
 type streamResult struct {
