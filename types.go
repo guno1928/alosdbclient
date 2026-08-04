@@ -5,6 +5,37 @@ import "io"
 // Document is a map with string keys and arbitrary values.
 type Document map[string]interface{}
 
+type IndexValueType string
+
+const (
+	IndexValueString  IndexValueType = "string"
+	IndexValueInteger IndexValueType = "integer"
+	IndexValueFloat   IndexValueType = "float"
+	IndexValueBoolean IndexValueType = "boolean"
+	IndexValueTime    IndexValueType = "time"
+	IndexValueBytes   IndexValueType = "bytes"
+)
+
+type IndexField struct {
+	Name      string         `json:"name" msgpack:"name"`
+	ValueType IndexValueType `json:"value_type" msgpack:"value_type"`
+}
+
+type IndexTypeIssue struct {
+	Position int            `json:"position" msgpack:"position"`
+	ID       string         `json:"id,omitempty" msgpack:"id,omitempty"`
+	Field    string         `json:"field" msgpack:"field"`
+	Expected IndexValueType `json:"expected" msgpack:"expected"`
+	Actual   string         `json:"actual" msgpack:"actual"`
+}
+
+type IndexBuildResult struct {
+	Indexed   int64            `json:"indexed" msgpack:"indexed"`
+	Skipped   int64            `json:"skipped" msgpack:"skipped"`
+	Issues    []IndexTypeIssue `json:"issues,omitempty" msgpack:"issues,omitempty"`
+	Truncated bool             `json:"truncated,omitempty" msgpack:"truncated,omitempty"`
+}
+
 // GetID returns the document's _id field as a string, or "" if not set.
 func (d Document) GetID() string {
 	if id, ok := d["_id"].(string); ok {
@@ -39,11 +70,13 @@ type CollectionInterface interface {
 	UpsertOne(filter Document, update Document) (bool, error)
 	UpsertMany(filter Document, update Document) (int, int, error)
 	Aggregate(pipeline []Document) ([]Document, error)
+	AggregateStream(pipeline []Document, opts StreamOptions, fn func([]Document) error) error
 	Count() int64
 	Drop()
 	GetName() string
 	HasCollection() (bool, error)
-	CreateIndex(field string, unique bool) error
+	CreateIndex(field string, valueType IndexValueType, unique bool) (IndexBuildResult, error)
+	CreateCompoundIndex(fields []IndexField, unique bool) (IndexBuildResult, error)
 	DropIndex(field string)
 	ListIndexes() []map[string]interface{}
 	RebuildIndex(field string) error

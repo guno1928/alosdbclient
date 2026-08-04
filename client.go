@@ -72,15 +72,6 @@ type pendingRequest struct {
 	respChan chan *response
 }
 
-
-
-
-
-
-
-
-
-
 // Client manages a connection to a remote ALOS DB server.
 type Client struct {
 	transport     clientTransport
@@ -145,8 +136,6 @@ func WithTimeout(timeout time.Duration) ClientOption {
 	}
 }
 
-
-
 // WithDatabase sets the target database name for all requests.
 //
 // Example:
@@ -198,7 +187,6 @@ func newClientWithConfig(config *ClientConfig, opts ...ClientOption) (*Client, e
 	if requestTimeout <= 0 {
 		requestTimeout = defaultClientRequestTimeout
 	}
-
 
 	var psk []byte
 	var authToken string
@@ -256,7 +244,6 @@ func (c *Client) Close() {
 	c.Flush()
 	close(c.stopFlush)
 	c.flushWg.Wait()
-
 
 	if c.transport != nil {
 		c.transport.close()
@@ -501,8 +488,6 @@ type remoteCollection struct {
 	name   string
 }
 
-
-
 // InsertOne inserts a single document. In async mode the ID is pre-generated
 // client-side before sending, so the returned ID is always valid even when
 // the server processes the insert in the background.
@@ -559,7 +544,6 @@ func (rc *remoteCollection) InsertMany(docs []Document) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
 
 	if resp == nil || len(resp.Result) == 0 {
 		return ids, nil
@@ -807,25 +791,34 @@ func (rc *remoteCollection) GetName() string {
 	return rc.name
 }
 
-func (rc *remoteCollection) CreateIndex(field string, unique bool) error {
-	type indexArgs struct {
-		Field  string `msgpack:"field"`
-		Unique bool   `msgpack:"unique"`
-	}
-	resp, err := rc.client.callDirect(opCreateIndex, rc.name, indexArgs{Field: field, Unique: unique})
+// CreateIndex declares and builds a typed single-field index.
+func (rc *remoteCollection) CreateIndex(field string, valueType IndexValueType, unique bool) (IndexBuildResult, error) {
+	return rc.createIndex(indexArgs{Field: field, ValueType: valueType, Unique: unique})
+}
+
+// CreateCompoundIndex declares and builds a typed multi-field index.
+func (rc *remoteCollection) CreateCompoundIndex(fields []IndexField, unique bool) (IndexBuildResult, error) {
+	return rc.createIndex(indexArgs{Fields: fields, Unique: unique})
+}
+
+func (rc *remoteCollection) createIndex(args indexArgs) (IndexBuildResult, error) {
+	resp, err := rc.client.callDirect(opCreateIndex, rc.name, args)
 	if err != nil {
-		return err
+		return IndexBuildResult{}, err
 	}
 	if resp.Error != "" {
-		return fmt.Errorf("%s", resp.Error)
+		return IndexBuildResult{}, fmt.Errorf("%s", resp.Error)
 	}
-	return nil
+	var result IndexBuildResult
+	if len(resp.Result) > 0 {
+		if err := msgpack.Unmarshal(resp.Result, &result); err != nil {
+			return IndexBuildResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func (rc *remoteCollection) DropIndex(field string) {
-	type indexArgs struct {
-		Field string `msgpack:"field"`
-	}
 	rc.client.callDirect(opDropIndex, rc.name, indexArgs{Field: field})
 }
 
@@ -918,6 +911,45 @@ func (rc *remoteCollection) Aggregate(pipeline []Document) ([]Document, error) {
 		return nil, err
 	}
 	return docs, nil
+}
+
+func (rc *remoteCollection) AggregateStream(pipeline []Document, opts StreamOptions, fn func([]Document) error) error {
+	pl := make([]map[string]interface{}, len(pipeline))
+	for i, stage := range pipeline {
+		pl[i] = map[string]interface{}(stage)
+	}
+
+	var cursor []byte
+	for {
+		resp, err := rc.client.callDirect(opAggregateStream, rc.name, aggregateStreamArgs{
+			Pipeline:  pl,
+			BatchSize: opts.BatchSize,
+			Cursor:    cursor,
+		})
+		if err != nil {
+			return err
+		}
+
+		var sr streamResult
+		if err := msgpack.Unmarshal(resp.Result, &sr); err != nil {
+			return err
+		}
+		if len(sr.Docs) > 0 {
+			var docs []Document
+			if err := msgpack.Unmarshal(sr.Docs, &docs); err != nil {
+				return err
+			}
+			if len(docs) > 0 {
+				if err := fn(docs); err != nil {
+					return err
+				}
+			}
+		}
+		if len(sr.Cursor) == 0 {
+			return nil
+		}
+		cursor = sr.Cursor
+	}
 }
 
 type remoteDatabase struct {
@@ -1214,4 +1246,3 @@ func (tx *remoteTransaction) Rollback() error {
 func (tx *remoteTransaction) GetID() string {
 	return tx.txID
 }
-

@@ -7,43 +7,46 @@ const compressionThreshold = 1024
 type opCode uint8
 
 const (
-	opInsertOne  opCode = 1
-	opInsertMany opCode = 2
-	opFindOne    opCode = 3
-	opFind       opCode = 4
-	opUpdateOne  opCode = 5
-	opUpdateMany opCode = 6
-	opDeleteOne  opCode = 7
-	opDeleteMany opCode = 8
-	opCount      opCode = 9
-	opFindByID   opCode = 10
-	opDrop       opCode = 12
-	opStats      opCode = 13
-	opFlush      opCode = 14
-	opBatch      opCode = 15
-	opTxBatch    opCode = 16
-	opUpsertOne         opCode = 17
-	opUpsertMany        opCode = 18
-	opDBExists          opCode = 19
-	opCollectionExists  opCode = 20
-	opCreateCollection  opCode = 23
-	opAggregate         opCode = 24
-	opBeginTx           opCode = 25
-	opTxFindOne         opCode = 26
-	opTxFindByID        opCode = 27
-	opTxInsertOne       opCode = 28
-	opTxUpdateOne       opCode = 29
-	opTxDeleteOne       opCode = 30
-	opTxCommit          opCode = 31
-	opTxRollback        opCode = 32
-	opFindManyCount     opCode = 33
-	opCreateIndex       opCode = 34
-	opDropIndex         opCode = 35
-	opListIndexes       opCode = 36
-	opRebuildIndex      opCode = 37
-	opReadTS            opCode = 38
-	opFindManyStream    opCode = 39
-	opFindPaginated     opCode = 40
+	opInsertOne        opCode = 1
+	opInsertMany       opCode = 2
+	opFindOne          opCode = 3
+	opFind             opCode = 4
+	opUpdateOne        opCode = 5
+	opUpdateMany       opCode = 6
+	opDeleteOne        opCode = 7
+	opDeleteMany       opCode = 8
+	opCount            opCode = 9
+	opFindByID         opCode = 10
+	opDrop             opCode = 12
+	opStats            opCode = 13
+	opFlush            opCode = 14
+	opBatch            opCode = 15
+	opTxBatch          opCode = 16
+	opUpsertOne        opCode = 17
+	opUpsertMany       opCode = 18
+	opDBExists         opCode = 19
+	opCollectionExists opCode = 20
+	opCreateCollection opCode = 23
+	opAggregate        opCode = 24
+	opBeginTx          opCode = 25
+	opTxFindOne        opCode = 26
+	opTxFindByID       opCode = 27
+	opTxInsertOne      opCode = 28
+	opTxUpdateOne      opCode = 29
+	opTxDeleteOne      opCode = 30
+	opTxCommit         opCode = 31
+	opTxRollback       opCode = 32
+	opFindManyCount    opCode = 33
+	_                  opCode = 34
+	_                  opCode = 35
+	opCreateIndex      opCode = 34
+	opDropIndex        opCode = 35
+	opListIndexes      opCode = 36
+	opRebuildIndex     opCode = 37
+	opReadTS           opCode = 38
+	opFindManyStream   opCode = 39
+	opFindPaginated    opCode = 40
+	opAggregateStream  opCode = 41
 )
 
 type batchRequest struct {
@@ -122,8 +125,10 @@ type deleteArgs struct {
 }
 
 type indexArgs struct {
-	Field  string `msgpack:"field"`
-	Unique bool   `msgpack:"unique"`
+	Field     string         `msgpack:"field"`
+	Unique    bool           `msgpack:"unique"`
+	Fields    []IndexField   `msgpack:"fields,omitempty"`
+	ValueType IndexValueType `msgpack:"value_type,omitempty"`
 }
 
 type txOperation struct {
@@ -151,6 +156,12 @@ type txResult struct {
 
 type aggregateArgs struct {
 	Pipeline []map[string]interface{} `msgpack:"pipeline"`
+}
+
+type aggregateStreamArgs struct {
+	Pipeline  []map[string]interface{} `msgpack:"pipeline"`
+	BatchSize int                      `msgpack:"batch_size,omitempty"`
+	Cursor    []byte                   `msgpack:"cursor,omitempty"`
 }
 
 type txIDArgs struct {
