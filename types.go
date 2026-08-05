@@ -75,8 +75,8 @@ type CollectionInterface interface {
 	Drop()
 	GetName() string
 	HasCollection() (bool, error)
-	CreateIndex(field string, valueType IndexValueType, unique bool) (IndexBuildResult, error)
-	CreateCompoundIndex(fields []IndexField, unique bool) (IndexBuildResult, error)
+	CreateIndex(field string, valueType IndexValueType) (IndexBuildResult, error)
+	CreateCompoundIndex(fields []IndexField) (IndexBuildResult, error)
 	DropIndex(field string)
 	ListIndexes() []map[string]interface{}
 	RebuildIndex(field string) error

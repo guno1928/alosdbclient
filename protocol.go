@@ -126,7 +126,6 @@ type deleteArgs struct {
 
 type indexArgs struct {
 	Field     string         `msgpack:"field"`
-	Unique    bool           `msgpack:"unique"`
 	Fields    []IndexField   `msgpack:"fields,omitempty"`
 	ValueType IndexValueType `msgpack:"value_type,omitempty"`
 }

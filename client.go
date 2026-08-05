@@ -47,7 +47,6 @@ const (
 //
 // RequestTimeout is the per-request timeout. Default is 15 seconds.
 //
-//
 // FireAndForget sends requests without waiting for a response.
 type ClientConfig struct {
 	ServerAddr     string
@@ -792,13 +791,13 @@ func (rc *remoteCollection) GetName() string {
 }
 
 // CreateIndex declares and builds a typed single-field index.
-func (rc *remoteCollection) CreateIndex(field string, valueType IndexValueType, unique bool) (IndexBuildResult, error) {
-	return rc.createIndex(indexArgs{Field: field, ValueType: valueType, Unique: unique})
+func (rc *remoteCollection) CreateIndex(field string, valueType IndexValueType) (IndexBuildResult, error) {
+	return rc.createIndex(indexArgs{Field: field, ValueType: valueType})
 }
 
 // CreateCompoundIndex declares and builds a typed multi-field index.
-func (rc *remoteCollection) CreateCompoundIndex(fields []IndexField, unique bool) (IndexBuildResult, error) {
-	return rc.createIndex(indexArgs{Fields: fields, Unique: unique})
+func (rc *remoteCollection) CreateCompoundIndex(fields []IndexField) (IndexBuildResult, error) {
+	return rc.createIndex(indexArgs{Fields: fields})
 }
 
 func (rc *remoteCollection) createIndex(args indexArgs) (IndexBuildResult, error) {
